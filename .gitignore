@@ -4,3 +4,6 @@
 # Local VS Code/PlatformIO configuration may contain machine-specific paths.
 .vscode/*
 !.vscode/extensions.json
+
+# Wi-Fi and MQTT credentials
+src/secrets.h
