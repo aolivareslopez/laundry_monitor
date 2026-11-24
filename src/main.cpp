@@ -41,7 +41,6 @@ float startThreshold = 0.35f;
 
 // State Debounce & Cycle Tracking
 uint32_t aboveStartSinceMs = 0;
-uint32_t aboveUnbalSinceMs = 0;
 uint32_t lastActiveVibMs = 0;
 uint32_t completedCycles = 0;
 uint32_t msgSequence = 0;
@@ -56,19 +55,6 @@ uint32_t lastBtnDebounceMs = 0;
 // Non-blocking Done Chime
 uint8_t doneChimeStep = 0;
 uint32_t doneChimeTimerMs = 0;
-
-uint32_t usToServoDuty(int us) {
-  return (uint32_t)us * 65536 / 20000;
-}
-
-void setServoPosition(int pulseUs) {
-  uint32_t duty = usToServoDuty(pulseUs);
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcWrite(Config::PIN_SERVO_PWM, duty);
-#else
-  ledcWrite(Config::SERVO_CH, duty);
-#endif
-}
 
 const char* resetReasonString() {
   switch (esp_reset_reason()) {
@@ -136,23 +122,15 @@ void enterState(WasherState nextState) {
   switch (currentState) {
     case WasherState::IDLE:
       digitalWrite(Config::PIN_LED_GREEN, HIGH);
-      setServoPosition(Config::SERVO_DONE_US);
       break;
 
     case WasherState::RUNNING:
       digitalWrite(Config::PIN_LED_YELLOW, HIGH);
-      setServoPosition(Config::SERVO_BUSY_US);
       lastActiveVibMs = millis();
-      break;
-
-    case WasherState::UNBALANCED:
-      digitalWrite(Config::PIN_LED_RED, HIGH);
-      setServoPosition(Config::SERVO_BUSY_US);
       break;
 
     case WasherState::DONE:
       completedCycles++;
-      setServoPosition(Config::SERVO_DONE_US);
       doneChimeStep = 1;
       doneChimeTimerMs = millis();
       break;
@@ -196,14 +174,7 @@ bool checkResetButtonPressed() {
 }
 
 void updateActuatorsNonBlocking(uint32_t now) {
-  if (currentState == WasherState::UNBALANCED) {
-    // Urgent alarm: 250 ms ON / 750 ms OFF
-    if (((now - stateEnteredMs) % 1000) < 250) {
-      tone(Config::PIN_BUZZER, 1200);
-    } else {
-      noTone(Config::PIN_BUZZER);
-    }
-  } else if (currentState == WasherState::DONE) {
+  if (currentState == WasherState::DONE) {
     // Blink green LED (500 ms ON / 500 ms OFF) to notify roommates
     digitalWrite(Config::PIN_LED_GREEN, (((now - stateEnteredMs) % 1000) < 500) ? HIGH : LOW);
 
@@ -276,7 +247,7 @@ void connectMqttNonBlocking(uint32_t now) {
   if (lastMqttTryMs != 0 && (now - lastMqttTryMs) < Config::MQTT_RETRY_MS) return;
   lastMqttTryMs = now;
 
-  Serial.print("[MQTT] Connecting to HiveMQ... ");
+  Serial.print("[MQTT] Connecting to EMQX... ");
   // Configure Last Will and Testament (LWT) on iot/T16/status
   const char* lwtPayload = "{\"device\":\"T16\",\"status\":\"offline\"}";
   if (mqtt.connect("esp32-t16", MQTT_USER, MQTT_PASS,
@@ -328,14 +299,6 @@ void setup() {
   pinMode(Config::PIN_BUTTON, INPUT_PULLUP);
   pinMode(Config::PIN_POT_ADC, INPUT);
 
-  // Configure Servo PWM
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcAttach(Config::PIN_SERVO_PWM, Config::SERVO_HZ, Config::SERVO_RES_BITS);
-#else
-  ledcSetup(Config::SERVO_CH, Config::SERVO_HZ, Config::SERVO_RES_BITS);
-  ledcAttachPin(Config::PIN_SERVO_PWM, Config::SERVO_CH);
-#endif
-
   // Initialize SPI OLED
   ui.begin();
 
@@ -355,14 +318,13 @@ void setup() {
 
   signer.begin(Wire);
 
-  // Configure TLS with pinned Root CA & larger MQTT buffer for signed JSON
-  tlsClient.setCACert(HIVEMQ_ROOT_CA);
+  // Configure TLS with pinned EMQX Root CA & larger MQTT buffer for signed JSON
+  tlsClient.setCACert(EMQX_ROOT_CA);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
 
   // Start in safest initial state (IDLE / Free) and enable Watchdog
   digitalWrite(Config::PIN_LED_GREEN, HIGH);
-  setServoPosition(Config::SERVO_DONE_US);
   initHardwareWatchdog();
 
   connectWifiNonBlocking(millis());
@@ -382,7 +344,7 @@ void loop() {
   // Read potentiometer & check reset button
   updatePotentiometerThreshold();
   if (checkResetButtonPressed()) {
-    if (currentState == WasherState::DONE || currentState == WasherState::UNBALANCED) {
+    if (currentState == WasherState::DONE) {
       Serial.println("[BTN] User reset -> IDLE");
       enterState(WasherState::IDLE);
     }
@@ -402,7 +364,7 @@ void loop() {
     sampleCount++;
   }
 
-  // Compute vibration intensity every 1 second (50 samples) for responsive state decisions
+  // Compute vibration intensity every 1 second (50 samples) for state decisions
   if (sampleCount >= 50) {
     double mean = accelSum / sampleCount;
     latestVib = (float)sqrt(max(0.0, (accelSqSum / sampleCount) - (mean * mean)));
@@ -410,9 +372,7 @@ void loop() {
     accelSqSum = 0.0;
     sampleCount = 0;
 
-    float unbalThreshold = startThreshold * Config::UNBALANCED_MULT;
-
-    // 2. DECIDE: State Machine Transitions
+    // 2. DECIDE: 3-State Machine Transitions (IDLE -> RUNNING -> DONE)
     switch (currentState) {
       case WasherState::IDLE:
         if (latestVib >= startThreshold) {
@@ -430,35 +390,8 @@ void loop() {
         if (latestVib >= startThreshold) {
           lastActiveVibMs = now;
         }
-
-        if (latestVib >= unbalThreshold) {
-          if (aboveUnbalSinceMs == 0) aboveUnbalSinceMs = now;
-          if (now - aboveUnbalSinceMs >= Config::UNBALANCED_CONFIRM_MS) {
-            aboveUnbalSinceMs = 0;
-            enterState(WasherState::UNBALANCED);
-          }
-        } else {
-          aboveUnbalSinceMs = 0;
-        }
-
         if (now - lastActiveVibMs >= Config::DONE_QUIET_MS) {
           enterState(WasherState::DONE);
-        }
-        break;
-
-      case WasherState::UNBALANCED:
-        if (latestVib >= startThreshold) {
-          lastActiveVibMs = now;
-        }
-        // Return to RUNNING if load settles below threshold for 10 seconds
-        if (latestVib < unbalThreshold) {
-          if (aboveUnbalSinceMs == 0) aboveUnbalSinceMs = now;
-          if (now - aboveUnbalSinceMs >= 10000) {
-            aboveUnbalSinceMs = 0;
-            enterState(WasherState::RUNNING);
-          }
-        } else {
-          aboveUnbalSinceMs = 0;
         }
         break;
 
@@ -468,7 +401,7 @@ void loop() {
     }
   }
 
-  // 3. ACT: Update non-blocking LED blink / buzzer alarm
+  // 3. ACT: Update non-blocking DONE LED blink & chime
   updateActuatorsNonBlocking(now);
 
   // 4. CONNECT: Periodic telemetry upload (or buffer if offline)
