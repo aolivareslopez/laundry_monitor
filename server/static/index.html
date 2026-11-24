@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laundry Machine Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e5e7eb;
+          --idle:#16a34a; --running:#ca8a04; --unbal:#dc2626; --done:#2563eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:18px 24px; background:var(--card); border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .row { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:16px; }
+  .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .big { font-size:28px; font-weight:700; margin-top:4px; }
+  .state { font-size:34px; font-weight:800; }
+  .badge { padding:4px 10px; border-radius:999px; font-size:13px; font-weight:600; }
+  .on { background:#dcfce7; color:#166534; } .off { background:#fee2e2; color:#991b1b; }
+  .alert { display:none; padding:14px 16px; border-radius:10px; font-weight:600; color:#fff; }
+  .tabs button { border:1px solid var(--line); background:var(--card); padding:6px 12px; border-radius:6px; cursor:pointer; }
+  .tabs button.active { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  .scroll { max-height:260px; overflow:auto; }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:800px) { .row, .stats, .two { grid-template-columns:1fr 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Laundry Machine Monitor · Team 16</h1>
+  <span id="online" class="badge off">waiting for data</span>
+</header>
+<main>
+  <div id="alert" class="alert"></div>
+
+  <section class="row">
+    <div class="card">
+      <div class="label">Machine</div>
+      <div id="state" class="state">–</div>
+      <div id="since" style="color:var(--muted)"></div>
+    </div>
+    <div class="card"><div class="label">Vibration</div><div id="vib" class="big">–</div><div style="color:var(--muted)">m/s² (std dev of |a|)</div></div>
+    <div class="card"><div class="label">Last reading</div><div id="age" class="big">–</div><div id="lastts" style="color:var(--muted)"></div></div>
+    <div class="card"><div class="label">Wi-Fi signal</div><div id="rssi" class="big">–</div><div id="uptime" style="color:var(--muted)"></div></div>
+  </section>
+
+  <section class="card">
+    <div class="head">
+      <h2>Vibration history</h2>
+      <div class="tabs">
+        <button data-h="1">1 h</button><button data-h="24" class="active">24 h</button><button data-h="72">72 h</button>
+      </div>
+    </div>
+    <div style="height:320px"><canvas id="chart"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Reliability (all data)</h2>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section class="two">
+    <div class="card"><h2>Gaps in data</h2><div class="scroll"><table id="gaps"></table></div></div>
+    <div class="card"><h2>Events</h2><div class="scroll"><table id="events"></table></div></div>
+  </section>
+</main>
+
+<script>
+const COLORS = { IDLE:'var(--idle)', RUNNING:'var(--running)', UNBALANCED:'var(--unbal)', DONE:'var(--done)' };
+const LABELS = { IDLE:'Available', RUNNING:'Running', UNBALANCED:'Unbalanced!', DONE:'Done: laundry waiting' };
+let hours = 24, thresholds = { run:null, unbal:null };
+
+const $ = id => document.getElementById(id);
+const fmtTime = s => new Date(s * 1000).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+function fmtDur(s) {
+  s = Math.round(s);
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s / 60) + ' min ' + (s % 60) + ' s';
+  return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min';
+}
+
+async function loadLive() {
+  const d = await (await fetch('/api/live')).json();
+  const on = $('online');
+  on.textContent = d.online ? 'online' : (d.last_seen ? 'offline · last seen ' + fmtTime(d.last_seen) : 'waiting for data');
+  on.className = 'badge ' + (d.online ? 'on' : 'off');
+  if (!d.reading) return;
+  const r = d.reading;
+  $('state').textContent = LABELS[r.state] || r.state;
+  $('state').style.color = COLORS[r.state];
+  $('since').textContent = d.state_since ? 'for ' + fmtDur(Date.now() / 1000 - d.state_since) : '';
+  $('vib').textContent = r.vib.toFixed(3);
+  $('age').textContent = fmtDur(Date.now() / 1000 - r.recv_ts) + ' ago';
+  $('lastts').textContent = fmtTime(r.ts);
+  if (d.heartbeat) {
+    const h = d.heartbeat;
+    $('rssi').textContent = h.rssi + ' dBm';
+    $('uptime').textContent = 'up ' + fmtDur(h.uptime) + ' · boot #' + h.boot;
+    thresholds = { run:h.runThr, unbal:h.unbalThr };
+  }
+  const a = $('alert');
+  if (r.state === 'UNBALANCED') { a.style.display = 'block'; a.style.background = 'var(--unbal)';
+    a.textContent = 'Unbalanced load: pause the machine and spread out the wet clothes.'; }
+  else if (r.state === 'DONE') { a.style.display = 'block'; a.style.background = 'var(--done)';
+    a.textContent = 'Cycle finished: laundry is ready to pick up.'; }
+  else a.style.display = 'none';
+}
+
+const chart = new Chart($('chart'), {
+  type: 'line',
+  data: { datasets: [
+    { label:'Average', data:[], borderColor:'#2563eb', borderWidth:1.5, pointRadius:0, spanGaps:false },
+    { label:'Peak', data:[], borderColor:'#93c5fd', borderWidth:1, pointRadius:0, spanGaps:false },
+    { label:'Running threshold', data:[], borderColor:'#ca8a04', borderDash:[6,4], borderWidth:1, pointRadius:0 },
+    { label:'Unbalanced threshold', data:[], borderColor:'#dc2626', borderDash:[6,4], borderWidth:1, pointRadius:0 },
+  ]},
+  options: {
+    animation:false, maintainAspectRatio:false, parsing:false, interaction:{ mode:'index', intersect:false },
+    scales: {
+      x: { type:'linear', ticks:{ maxTicksLimit:8, callback:v => fmtTime(v).replace(/:\d\d$/, '') } },
+      y: { beginAtZero:true, title:{ display:true, text:'m/s²' } },
+    },
+    plugins: { tooltip:{ callbacks:{ title:i => fmtTime(i[0].parsed.x) } } },
+  },
+});
+
+async function loadHistory() {
+  const d = await (await fetch('/api/history?hours=' + hours)).json();
+  const avg = [], max = [];
+  let prev = null;
+  for (const p of d.points) {
+    if (prev !== null && p.t - prev > 3 * d.bucket) {      // break the line at gaps
+      avg.push({ x:prev + d.bucket, y:null }); max.push({ x:prev + d.bucket, y:null });
+    }
+    avg.push({ x:p.t, y:p.avg }); max.push({ x:p.t, y:p.max });
+    prev = p.t;
+  }
+  const now = Date.now() / 1000, start = now - hours * 3600;
+  chart.data.datasets[0].data = avg;
+  chart.data.datasets[1].data = max;
+  chart.data.datasets[2].data = thresholds.run != null ? [{ x:start, y:thresholds.run }, { x:now, y:thresholds.run }] : [];
+  chart.data.datasets[3].data = thresholds.unbal != null ? [{ x:start, y:thresholds.unbal }, { x:now, y:thresholds.unbal }] : [];
+  chart.options.scales.x.min = start; chart.options.scales.x.max = now;
+  chart.update();
+
+  $('gaps').innerHTML = '<tr><th>From</th><th>To</th><th>Length</th></tr>' +
+    (d.gaps.map(g => `<tr><td>${fmtTime(g.from)}</td><td>${fmtTime(g.to)}</td><td>${fmtDur(g.seconds)}</td></tr>`).join('')
+     || '<tr><td colspan="3">No gaps in this range</td></tr>');
+  $('events').innerHTML = '<tr><th>Time</th><th>Event</th><th>Detail</th></tr>' +
+    (d.events.map(e => `<tr><td>${fmtTime(e.ts)}</td><td>${e.kind}</td><td>${e.detail}</td></tr>`).join('')
+     || '<tr><td colspan="3">No events in this range</td></tr>');
+}
+
+async function loadStats() {
+  const s = await (await fetch('/api/stats')).json();
+  const items = [
+    ['Logging for', s.span_s ? fmtDur(s.span_s) : '–'],
+    ['Readings received / expected', s.expected ? `${s.received} / ${s.expected} (${s.received_pct}%)` : '–'],
+    ['Data uptime', s.uptime_pct != null ? s.uptime_pct + '%' : '–'],
+    ['Time in gaps', fmtDur(s.gap_seconds || 0)],
+    ['Sent late from buffer', s.backfilled],
+    ['Lost within a boot', s.missing_seq_within_boots],
+    ['Boots seen', s.boots],
+    ['Rejected signatures', s.bad_signatures],
+  ];
+  $('stats').innerHTML = items.map(([k, v]) => `<div><div class="label">${k}</div><div class="big" style="font-size:20px">${v}</div></div>`).join('');
+}
+
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); hours = +b.dataset.h; loadHistory();
+});
+
+loadLive().then(loadHistory); loadStats();
+setInterval(loadLive, 2000);
+setInterval(loadHistory, 30000);
+setInterval(loadStats, 60000);
+</script>
+</body>
+</html>
