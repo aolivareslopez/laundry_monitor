@@ -3,7 +3,7 @@
 
 // Set to 1 for quick bench testing (16 s publish, 10 s quiet-to-DONE).
 // Set to 0 before starting the 72-hour unattended reliability run.
-#define DRY_RUN_MODE 1
+#define DRY_RUN_MODE 0
 
 namespace Config {
   constexpr const char* DEVICE_ID = "T16";
@@ -47,7 +47,7 @@ namespace Config {
   // 30 s = 8,640 msgs / 72 h (use 35000 if you want all 72 h inside 1 ThingSpeak 8,000-pt chart)
   constexpr uint32_t PUBLISH_INTERVAL_MS  = 30000;
   constexpr uint32_t START_CONFIRM_MS     = 3000;   // 3 s sustained shake to start cycle
-  constexpr uint32_t DONE_QUIET_MS        = 120000; // 2 min quiet to ignore rinse/drain pauses
+  constexpr uint32_t DONE_QUIET_MS        = 180000; // 3 min quiet to ignore rinse/drain pauses
 #endif
 
   // Button Timings
