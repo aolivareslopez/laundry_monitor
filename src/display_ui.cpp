@@ -17,6 +17,7 @@ bool DisplayUI::begin() {
     oled.setTextSize(1);
     oled.setCursor(0, 0);
     oled.println("Group 16 Laundry Mon");
+    oled.println("ThingSpeak TLS Mode");
     oled.println("Booting...");
     oled.display();
   }
@@ -37,6 +38,7 @@ void DisplayUI::showError(const char* line1, const char* line2) {
 void DisplayUI::render(WasherState state,
                        float vib,
                        float startThresh,
+                       bool thrLocked,
                        bool wifiOk,
                        bool mqttOk,
                        size_t bufferedCount,
@@ -50,17 +52,21 @@ void DisplayUI::render(WasherState state,
   oled.setCursor(0, 0);
   oled.print(stateToString(state));
 
-  // Line 3: Live Vibration vs Threshold
+  // Line 2: Live Vibration
   oled.setTextSize(1);
   oled.setCursor(0, 22);
   oled.printf("Vib: %.2f m/s2", vib);
 
-  oled.setCursor(0, 33);
-  oled.printf("Thr: %.2f  Cycles:%lu", startThresh, (unsigned long)cyclesCompleted);
+  // Line 3: Threshold (with [L] lock indicator) & Completed Cycles
+  oled.setCursor(0, 34);
+  oled.printf("Thr:%.2f%s Cyc:%lu",
+              startThresh,
+              thrLocked ? "[L]" : "   ",
+              (unsigned long)cyclesCompleted);
 
-  // Bottom Line: Connectivity & Offline Buffer
+  // Bottom Line: Connectivity & Offline Queue Depth
   oled.setCursor(0, 50);
-  oled.printf("W:%s M:%s Buf:%u",
+  oled.printf("W:%s M:%s Q:%u",
               wifiOk ? "OK" : "--",
               mqttOk ? "OK" : "--",
               (unsigned int)bufferedCount);

@@ -26,22 +26,27 @@ bool PayloadSigner::begin(TwoWire& wire) {
 }
 
 String PayloadSigner::signMessage(const String& message) {
+  return signMessage(message.c_str(), message.length());
+}
+
+String PayloadSigner::signMessage(const char* data, size_t len) {
+  if (data == nullptr || len == 0) return String();
+
   uint8_t digest[32];
-  mbedtls_sha256(reinterpret_cast<const uint8_t*>(message.c_str()),
-                 message.length(), digest, 0);
+  mbedtls_sha256(reinterpret_cast<const uint8_t*>(data), len, digest, 0);
 
   if (hwReady_ && atecc.createSignature(digest)) {
     return toHex(atecc.signature, 64);
   }
 
-  // Fallback HMAC-SHA256 if ATECC608A slot 0 is unprovisioned
+  // Fallback HMAC-SHA256 when ATECC608A Slot 0 is unprovisioned
   uint8_t hmac[32];
   const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   mbedtls_md_hmac(mdInfo,
                   reinterpret_cast<const uint8_t*>(FALLBACK_HMAC_KEY),
                   strlen(FALLBACK_HMAC_KEY),
-                  reinterpret_cast<const uint8_t*>(message.c_str()),
-                  message.length(),
+                  reinterpret_cast<const uint8_t*>(data),
+                  len,
                   hmac);
   return toHex(hmac, 32);
 }

@@ -8,6 +8,7 @@ public:
   void render(WasherState state,
               float vib,
               float startThresh,
+              bool thrLocked,
               bool wifiOk,
               bool mqttOk,
               size_t bufferedCount,
